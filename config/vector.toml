@@ -1,0 +1,56 @@
+data_dir = "/var/lib/vector"
+
+[sources.docker]
+type = "docker_logs"
+docker_host = "unix:///var/run/docker.sock"
+
+[transforms.parse_json]
+type = "remap"
+inputs = ["docker"]
+source = '''
+  # Try to parse as JSON, but allow failures - pass through if not JSON
+  message_str = to_string(.message) ?? ""
+  if (starts_with(message_str, "{")) || (starts_with(message_str, "[")) {
+    . = parse_json(message_str) ?? .
+  }
+'''
+
+[transforms.add_labels]
+type = "remap"
+inputs = ["parse_json"]
+source = '''
+  # Extract container name and set as service label
+  .service = string!(.container_name)
+  .environment = "dev"
+
+  # Extract trace_id from log message if present (text format: trace_id=abc123)
+  message_str = to_string(.message) ?? ""
+  if match(message_str, r'trace_id=([a-f0-9]+)') {
+    trace_match = parse_regex!(message_str, r'trace_id=(?P<trace_id>[a-f0-9]+)')
+    .trace_id = trace_match.trace_id
+  }
+
+  # Also check if trace_id exists as a field (JSON logs)
+  if exists(.trace_id) {
+    .trace_id = string!(.trace_id)
+  }
+  if exists(.span_id) {
+    .span_id = string!(.span_id)
+  }
+'''
+
+[sinks.loki]
+type = "loki"
+inputs = ["add_labels"]
+endpoint = "http://loki:3100"
+
+[sinks.loki.encoding]
+codec = "json"
+
+[sinks.loki.labels]
+job = "docker"
+service = "{{ service }}"
+environment = "{{ environment }}"
+
+[sinks.loki.request]
+timeout_secs = 30

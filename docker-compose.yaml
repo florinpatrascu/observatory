@@ -1,0 +1,183 @@
+services:
+  # Grafana Mimir for long-term metrics storage
+  mimir:
+    image: grafana/mimir:latest
+    container_name: mimir
+    command:
+      - -config.file=/etc/mimir/mimir.yaml
+    volumes:
+      - ./config/mimir.yaml:/etc/mimir/mimir.yaml:ro
+      - mimir-data:/data
+    ports:
+      - "9009:9009"
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/bin/mimir", "-version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      service: mimir
+
+  # Grafana Tempo for distributed tracing
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tempo
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    volumes:
+      - ./config/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200" # HTTP
+      - "3201:3201" # gRPC
+      # Note: OTLP ports (4317/4318) not exposed to host - OTEL Collector handles external ingestion
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/tempo", "-version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      service: tempo
+
+  # OpenTelemetry Collector for trace ingestion
+  otel-collector:
+    image: otel/opentelemetry-collector-k8s:latest
+    container_name: otel-collector
+    command:
+      - "--config=/etc/otel/otel-collector.yaml"
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otel/otel-collector.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+      - "9411:9411" # Zipkin
+      - "14250:14250" # Jaeger gRPC
+      - "14268:14268" # Jaeger HTTP
+      - "55679:55679" # ZPages
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - tempo
+    labels:
+      service: otel-collector
+
+  # Grafana Loki for log aggregation
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    command: -config.file=/etc/loki/loki.yaml
+    volumes:
+      - ./config/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - observability
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      service: loki
+
+  # Vector for log collection and routing (more flexible than Promtail)
+  vector:
+    image: timberio/vector:latest-alpine
+    container_name: vector
+    command: --config /etc/vector/vector.toml
+    volumes:
+      - ./config/vector.toml:/etc/vector/vector.toml:ro
+      - /var/log:/var/log:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - loki
+    labels:
+      service: vector
+
+  # Promtail for file-based log collection (dev apps)
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    command:
+      - -config.file=/etc/promtail/promtail.yaml
+      - -config.expand-env=true
+    environment:
+      - APP_NAME=${APP_NAME:-app}
+      - APP_ENVIRONMENT=${APP_ENVIRONMENT:-dev}
+    volumes:
+      - ./config/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - ${LOGS_PATH:-./logs}:/logs:ro
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - loki
+    labels:
+      service: ${APP_NAME:-promtail}
+
+  # Grafana for visualization (metrics, logs, traces)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    # docker-compose reads from .env file OR environment variables (e.g., from .envrc with direnv)
+    # Credentials persist in grafana-data volume after first initialization
+    environment:
+      # Admin credentials (only used on first startup if database doesn't exist)
+      # Set via .envrc (direnv) or .env file
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+      - GF_LOG_LEVEL=info
+      # Skip the "Welcome to Grafana" screen and go directly to home page
+      - GF_USERS_HOME_PAGE=/dashboards
+      # Optionally set a default dashboard as home (uncomment and set dashboard UID)
+      # - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/files/your-dashboard.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - observability
+    restart: unless-stopped
+    depends_on:
+      - mimir
+      - loki
+      - tempo
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    labels:
+      service: grafana
+
+networks:
+  observability:
+    driver: bridge
+
+volumes:
+  mimir-data:
+    driver: local
+  tempo-data:
+    driver: local
+  loki-data:
+    driver: local
+  grafana-data:
+    driver: local

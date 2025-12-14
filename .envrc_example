@@ -1,0 +1,13 @@
+# Grafana Admin Credentials
+# Used on first Grafana startup only. After initialization, credentials persist in volume.
+export GRAFANA_ADMIN_USER=admin
+export GRAFANA_ADMIN_PASSWORD=changeme
+
+# Promtail Configuration
+# Set these to match your application
+export APP_NAME=myapp
+export APP_ENVIRONMENT=dev
+
+# Path to application logs (mounted to /logs in Promtail container)
+# Point this to your application's log directory
+export LOGS_PATH=/path/to/your/app/log

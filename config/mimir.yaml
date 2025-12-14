@@ -1,0 +1,94 @@
+# Grafana Mimir Configuration
+target: all
+
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  log_level: info
+
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /data
+
+# For GCS storage on Google Cloud Platform:
+# common:
+#   storage:
+#     backend: gcs
+#     gcs:
+#       bucket_name: your-mimir-storage-bucket
+#       # For authentication, mount your GCS credentials
+#       # service_account: /etc/gcs/key.json
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/blocks
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+  tsdb:
+    dir: /data/tsdb
+
+# For GCS blocks storage on GCP:
+# blocks_storage:
+#   backend: gcs
+#   gcs:
+#     bucket_name: your-mimir-blocks-bucket
+#   bucket_store:
+#     sync_dir: /data/tsdb-sync
+#   tsdb:
+#     dir: /data/tsdb
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    kvstore:
+      store: memberlist
+  pool:
+    health_check_ingesters: true
+
+ingester:
+  ring:
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+    kvstore:
+      store: memberlist
+
+memberlist:
+  node_name: mimir
+  bind_port: 7946
+  join_members:
+    - mimir:7946
+
+# For GCS ruler storage on GCP:
+# ruler_storage:
+#   backend: gcs
+#   gcs:
+#     bucket_name: your-mimir-rules-bucket
+
+# For GCS alertmanager storage on GCP:
+# alertmanager_storage:
+#   backend: gcs
+#   gcs:
+#     bucket_name: your-mimir-alertmanager-bucket
+
+limits:
+  ingestion_rate: 100000
+  ingestion_burst_size: 200000
+  max_global_series_per_user: 10000000
+  max_global_series_per_metric: 100000
+  max_label_names_per_series: 30
+  max_label_name_length: 1024
+  max_label_value_length: 2048
