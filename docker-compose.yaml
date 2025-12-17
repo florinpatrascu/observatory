@@ -34,7 +34,7 @@ services:
     ports:
       - "3200:3200" # HTTP
       - "3201:3201" # gRPC
-      # Note: OTLP ports (4317/4318) not exposed to host - OTEL Collector handles external ingestion
+      # Note: OTLP ports (4317/4318) not exposed to host - Alloy handles external ingestion
     networks:
       - observability
     restart: unless-stopped
@@ -47,28 +47,39 @@ services:
     labels:
       service: tempo
 
-  # OpenTelemetry Collector for trace ingestion
-  otel-collector:
-    image: otel/opentelemetry-collector-k8s:latest
-    container_name: otel-collector
+  # Grafana Alloy - unified telemetry collector
+  # Replaces: OTEL Collector, Promtail, Vector
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
     command:
-      - "--config=/etc/otel/otel-collector.yaml"
+      - run
+      - /etc/alloy/config.alloy
+      - --storage.path=/var/lib/alloy/data
+      - --server.http.listen-addr=0.0.0.0:12345
+    environment:
+      - APP_NAME=${APP_NAME:-app}
+      - APP_ENVIRONMENT=${APP_ENVIRONMENT:-dev}
     volumes:
-      - ./config/otel-collector.yaml:/etc/otel/otel-collector.yaml:ro
+      - ./config/alloy.alloy:/etc/alloy/config.alloy:ro
+      - ${LOGS_PATH:-./logs}:/logs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy
     ports:
-      - "4317:4317" # OTLP gRPC
-      - "4318:4318" # OTLP HTTP
-      - "9411:9411" # Zipkin
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "9411:9411"   # Zipkin
       - "14250:14250" # Jaeger gRPC
       - "14268:14268" # Jaeger HTTP
-      - "55679:55679" # ZPages
+      - "12345:12345" # Alloy UI (debugging pipelines)
     networks:
       - observability
     restart: unless-stopped
     depends_on:
       - tempo
+      - loki
     labels:
-      service: otel-collector
+      service: alloy
 
   # Grafana Loki for log aggregation
   loki:
@@ -91,43 +102,6 @@ services:
     labels:
       service: loki
 
-  # Vector for log collection and routing (more flexible than Promtail)
-  vector:
-    image: timberio/vector:latest-alpine
-    container_name: vector
-    command: --config /etc/vector/vector.toml
-    volumes:
-      - ./config/vector.toml:/etc/vector/vector.toml:ro
-      - /var/log:/var/log:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - observability
-    restart: unless-stopped
-    depends_on:
-      - loki
-    labels:
-      service: vector
-
-  # Promtail for file-based log collection (dev apps)
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
-    command:
-      - -config.file=/etc/promtail/promtail.yaml
-      - -config.expand-env=true
-    environment:
-      - APP_NAME=${APP_NAME:-app}
-      - APP_ENVIRONMENT=${APP_ENVIRONMENT:-dev}
-    volumes:
-      - ./config/promtail.yaml:/etc/promtail/promtail.yaml:ro
-      - ${LOGS_PATH:-./logs}:/logs:ro
-    networks:
-      - observability
-    restart: unless-stopped
-    depends_on:
-      - loki
-    labels:
-      service: ${APP_NAME:-promtail}
 
   # Grafana for visualization (metrics, logs, traces)
   grafana:
@@ -180,4 +154,6 @@ volumes:
   loki-data:
     driver: local
   grafana-data:
+    driver: local
+  alloy-data:
     driver: local

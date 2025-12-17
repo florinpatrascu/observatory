@@ -1,0 +1,254 @@
+// =============================================================================
+// Grafana Alloy Configuration
+// Replaces: Promtail, Vector, OTEL Collector
+// =============================================================================
+
+// =============================================================================
+// PART 1: FILE-BASED LOG COLLECTION (replaces Promtail)
+// Strategy: JSON logs from files → parse → add labels → template output → Loki
+// =============================================================================
+
+// Discover log files matching the pattern
+local.file_match "app_logs" {
+  path_targets = [{
+    __path__ = "/logs/" + coalesce(env("APP_ENVIRONMENT"), "dev") + ".log*",
+  }]
+}
+
+// Read log files and forward to processing pipeline
+loki.source.file "app_logs" {
+  targets    = local.file_match.app_logs.targets
+  forward_to = [loki.process.app_logs.receiver]
+}
+
+// Process logs exactly like Promtail did:
+// 1. Parse JSON
+// 2. Extract timestamp
+// 3. Add level as label
+// 4. Create output template with trace context
+loki.process "app_logs" {
+  forward_to = [loki.write.default.receiver]
+
+  // Parse JSON and extract fields
+  stage.json {
+    expressions = {
+      timestamp  = "time",
+      level      = "severity",
+      msg        = "message",
+      trace_id   = "trace",
+      span_id    = "span",
+      request_id = "metadata.request_id",
+    }
+  }
+
+  // Set timestamp from the 'time' field
+  stage.timestamp {
+    source = "timestamp"
+    format = "RFC3339"
+  }
+
+  // Add level as label (low cardinality)
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  // Create output template with trace context embedded (for Tempo correlation)
+  stage.template {
+    source   = "output_line"
+    template = "{{ .msg }} | trace_id={{ .trace_id }} span_id={{ .span_id }} request_id={{ .request_id }}"
+  }
+
+  // Set the output
+  stage.output {
+    source = "output_line"
+  }
+
+  // Add static labels
+  stage.static_labels {
+    values = {
+      job         = coalesce(env("APP_NAME"), "app"),
+      service     = coalesce(env("APP_NAME"), "app"),
+      environment = coalesce(env("APP_ENVIRONMENT"), "dev"),
+    }
+  }
+}
+
+// =============================================================================
+// PART 2: DOCKER LOG COLLECTION (replaces Vector)
+// Strategy: Docker logs → parse JSON if possible → extract trace context → Loki
+// =============================================================================
+
+// Collect logs from Docker containers
+loki.source.docker "docker_logs" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.docker.containers.targets
+  forward_to = [loki.process.docker_logs.receiver]
+  relabel_rules = loki.relabel.docker_labels.rules
+}
+
+// Discover Docker containers
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Relabel to extract container name as service
+loki.relabel "docker_labels" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container_name"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "service"
+  }
+}
+
+// Process Docker logs exactly like Vector did
+loki.process "docker_logs" {
+  forward_to = [loki.write.default.receiver]
+
+  // Try to parse JSON if message starts with { or [
+  stage.json {
+    expressions = {
+      message  = "message",
+      trace_id = "trace_id",
+      span_id  = "span_id",
+    }
+  }
+
+  // Extract trace_id from text format: trace_id=abc123
+  stage.regex {
+    expression = "trace_id=(?P<trace_id_text>[a-f0-9]+)"
+  }
+
+  // Use extracted trace_id (from JSON or text)
+  stage.template {
+    source   = "trace_id"
+    template = "{{ if .trace_id }}{{ .trace_id }}{{ else }}{{ .trace_id_text }}{{ end }}"
+  }
+
+  // Add static labels (job=docker matches Vector config)
+  stage.static_labels {
+    values = {
+      job         = "docker",
+      environment = "dev",
+    }
+  }
+
+  // Labels from relabeling (service from container name)
+  stage.label_keep {
+    values = ["job", "environment", "service", "container_name"]
+  }
+}
+
+// =============================================================================
+// PART 3: LOKI WRITE CLIENT
+// =============================================================================
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+// =============================================================================
+// PART 4: OPENTELEMETRY TRACE COLLECTION (replaces OTEL Collector)
+// Receivers: OTLP (gRPC/HTTP), Jaeger (gRPC/HTTP), Zipkin
+// =============================================================================
+
+// OTLP Receiver (gRPC and HTTP)
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Jaeger Receiver
+otelcol.receiver.jaeger "default" {
+  protocols {
+    grpc {
+      endpoint = "0.0.0.0:14250"
+    }
+    thrift_http {
+      endpoint = "0.0.0.0:14268"
+    }
+  }
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Zipkin Receiver
+otelcol.receiver.zipkin "default" {
+  endpoint = "0.0.0.0:9411"
+  output {
+    traces = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Batch Processor
+otelcol.processor.batch "default" {
+  send_batch_size = 1024
+  timeout         = "10s"
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// =============================================================================
+// OPTIONAL: Tail Sampling Processor
+// =============================================================================
+// Uncomment to enable tail sampling (filter spans based on duration/errors)
+//
+// otelcol.processor.tail_sampling "default" {
+//   decision_wait               = "10s"
+//   num_traces                  = 50000
+//   expected_new_traces_per_sec = 100
+//
+//   policy {
+//     name = "errors-policy"
+//     type = "status_code"
+//     status_code {
+//       status_codes = ["ERROR"]
+//     }
+//   }
+//
+//   policy {
+//     name = "slow-spans-policy"
+//     type = "latency"
+//     latency {
+//       threshold_ms = 1
+//     }
+//   }
+//
+//   output {
+//     traces = [otelcol.exporter.otlp.tempo.input]
+//   }
+// }
+//
+// To enable: change batch processor output to tail_sampling input:
+// output { traces = [otelcol.processor.tail_sampling.default.input] }
+
+// OTLP Exporter to Tempo
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure = true
+    }
+  }
+}
+

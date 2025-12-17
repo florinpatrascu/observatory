@@ -13,29 +13,30 @@ A Grafana-centric local observability stack for metrics, logs, and traces.
  (Prometheus)         (OTLP)         (stdout/file)
        |                 |                 |
        v                 v                 v
-     Mimir         OTEL Collector   Promtail/Vector
-       |                 |                 |
-       +--------+--------+---------+-------+
-                |                  |
-                v                  v
-              Tempo              Loki
-                |                  |
-                +--------+---------+
+     Mimir       +-------+-------+      Alloy
+       |         |               |    (file/docker)
+       |      Alloy           Alloy       |
+       |   (OTLP/Jaeger)    (Zipkin)      |
+       |         |               |        |
+       |         +-------+-------+        |
+       |                 |                |
+       |                 v                v
+       |               Tempo            Loki
+       |                 |                |
+       +-----------------+----------------+
                          |
                       Grafana
 ```
 
 ## Services
 
-| Service        | Port       | Purpose                                   |
-| -------------- | ---------- | ----------------------------------------- |
-| Grafana        | 3000       | Visualization dashboard                   |
-| Mimir          | 9009       | Metrics storage (Prometheus remote write) |
-| Tempo          | 3200       | Distributed tracing                       |
-| Loki           | 3100       | Log aggregation                           |
-| OTEL Collector | 4317, 4318 | Trace ingestion (OTLP gRPC/HTTP)          |
-| Vector         | -          | Log collection from Docker containers     |
-| Promtail       | 9080       | Log collection from files                 |
+| Service | Port              | Purpose                                              |
+| ------- | ----------------- | ---------------------------------------------------- |
+| Grafana | 3000              | Visualization dashboard                              |
+| Mimir   | 9009              | Metrics storage (Prometheus remote write)            |
+| Tempo   | 3200              | Distributed tracing                                  |
+| Loki    | 3100              | Log aggregation                                      |
+| Alloy   | 4317, 4318, 12345 | Unified collector (traces, logs from files & Docker) |
 
 ## Quick Start
 
@@ -54,7 +55,7 @@ Edit `.envrc` with your settings:
 export GRAFANA_ADMIN_USER=admin
 export GRAFANA_ADMIN_PASSWORD=your_password
 
-# Application log collection (Promtail)
+# Application log collection (Alloy)
 export APP_NAME=myapp
 export APP_ENVIRONMENT=dev
 export LOGS_PATH=/path/to/your/app/log
@@ -93,13 +94,13 @@ Datasources are pre-configured:
 
 ## Environment Variables
 
-| Variable                 | Default | Description                                    |
-| ------------------------ | ------- | ---------------------------------------------- |
-| `GRAFANA_ADMIN_USER`     | admin   | Grafana admin username                         |
-| `GRAFANA_ADMIN_PASSWORD` | admin   | Grafana admin password                         |
-| `APP_NAME`               | app     | Application name for log labels                |
-| `APP_ENVIRONMENT`        | dev     | Environment label for logs                     |
-| `LOGS_PATH`              | ./logs  | Path to application logs (mounted to Promtail) |
+| Variable                 | Default | Description                                 |
+| ------------------------ | ------- | ------------------------------------------- |
+| `GRAFANA_ADMIN_USER`     | admin   | Grafana admin username                      |
+| `GRAFANA_ADMIN_PASSWORD` | admin   | Grafana admin password                      |
+| `APP_NAME`               | app     | Application name for log labels             |
+| `APP_ENVIRONMENT`        | dev     | Environment label for logs                  |
+| `LOGS_PATH`              | ./logs  | Path to application logs (mounted to Alloy) |
 
 ## Connecting Your Application
 
@@ -119,10 +120,10 @@ Send traces via OpenTelemetry:
 
 ### Logs
 
-Two options:
+Two options (both handled by Alloy):
 
-1. **File-based (Promtail)**: Write logs to a file, set `LOGS_PATH` to the directory
-2. **Docker (Vector)**: Logs from stdout are automatically collected from containers
+1. **File-based**: Write logs to a file, set `LOGS_PATH` to the directory
+2. **Docker**: Logs from stdout are automatically collected from containers
 
 ## Storage
 
@@ -132,6 +133,7 @@ All data is stored in Docker volumes:
 - `tempo-data`: Traces
 - `loki-data`: Logs
 - `grafana-data`: Dashboards and settings
+- `alloy-data`: Alloy state (positions, WAL)
 
 To reset all data:
 
@@ -155,6 +157,14 @@ curl http://localhost:9009/ready  # Mimir
 curl http://localhost:3200/ready  # Tempo
 ```
 
+### Alloy Debugging UI
+
+Alloy provides a built-in UI for visualizing and debugging pipelines:
+
+- URL: <http://localhost:12345>
+
+Use this to inspect component status, view logs, and debug pipeline issues.
+
 ## Demo Application
 
 For a practical example, take a look at [Fish Finder](https://github.com/florinpatrascu/fish_finder), a [Phoenix](https://www.phoenixframework.org) application that demonstrates best-practice integration of metrics, traces end to end, and logs. The app includes spans, events, and span-specific metadata, and comes with a curated set of dashboards, including those supplied by [PromEx](https://github.com/akoutmos/prom_ex) library.
@@ -171,6 +181,7 @@ To use with Fish Finder:
 ## References
 
 - [Grafana](https://grafana.com/docs/grafana/latest/)
+- [Grafana Alloy](https://grafana.com/docs/alloy/latest/)
 - [Mimir](https://grafana.com/docs/mimir/latest/)
 - [Tempo](https://grafana.com/docs/tempo/latest/)
 - [Loki](https://grafana.com/docs/loki/latest/)
